@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+# netinfo - Network & Filesystem Info Tool
+# Installable via Homebrew
+
+set -euo pipefail
+
+VERSION="1.0.0"
+BOLD='\033[1m'
+DIM='\033[2m'
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+BLUE='\033[0;34m'
+MAGENTA='\033[0;35m'
+RESET='\033[0m'
+
+# ─────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────
+
+print_header() {
+  echo ""
+  echo -e "${BOLD}${CYAN}╔══════════════════════════════════════╗${RESET}"
+  echo -e "${BOLD}${CYAN}║       netinfo v${VERSION} — System Tool      ║${RESET}"
+  echo -e "${BOLD}${CYAN}╚══════════════════════════════════════╝${RESET}"
+  echo ""
+}
+
+section() {
+  echo -e "${BOLD}${YELLOW}▶ $1${RESET}"
+  echo -e "${DIM}────────────────────────────────────────${RESET}"
+}
+
+row() {
+  printf "  ${CYAN}%-22s${RESET} %s\n" "$1" "$2"
+}
+
+ok()   { echo -e "  ${GREEN}✔${RESET} $1"; }
+warn() { echo -e "  ${YELLOW}⚠${RESET} $1"; }
+err()  { echo -e "  ${RED}✘${RESET} $1"; }
+
+# ─────────────────────────────────────────────
+# Commands
+# ─────────────────────────────────────────────
+
+cmd_ip() {
+  section "Public IP (ifconfig.me)"
+  if ! command -v curl &>/dev/null; then
+    err "curl is not installed"
+    return 1
+  fi
+
+  echo -ne "  Fetching... "
+  PUBLIC_IP=$(curl -sf --max-time 5 ifconfig.me 2>/dev/null || echo "")
+
+  if [[ -z "$PUBLIC_IP" ]]; then
+    err "Could not reach ifconfig.me (check your connection)"
+  else
+    echo ""
+    row "Public IP:" "$PUBLIC_IP"
+    # Also fetch geo info
+    GEO=$(curl -sf --max-time 5 "https://ipinfo.io/${PUBLIC_IP}/json" 2>/dev/null || echo "{}")
+    CITY=$(echo "$GEO"    | grep '"city"'    | cut -d'"' -f4)
+    REGION=$(echo "$GEO"  | grep '"region"'  | cut -d'"' -f4)
+    COUNTRY=$(echo "$GEO" | grep '"country"' | cut -d'"' -f4)
+    ORG=$(echo "$GEO"     | grep '"org"'     | cut -d'"' -f4)
+    [[ -n "$CITY" ]]    && row "City:"    "$CITY, $REGION"
+    [[ -n "$COUNTRY" ]] && row "Country:" "$COUNTRY"
+    [[ -n "$ORG" ]]     && row "ISP/Org:" "$ORG"
+  fi
+  echo ""
+}
+
+cmd_net() {
+  section "Local Network"
+
+  # Local IP addresses
+  if command -v ifconfig &>/dev/null; then
+    while IFS= read -r line; do
+      row "Interface:" "$line"
+    done < <(ifconfig | awk '/^[a-z]/{iface=$1} /inet / && !/127.0.0.1/{print iface" → "$2}')
+  elif command -v ip &>/dev/null; then
+    while IFS= read -r line; do
+      row "Interface:" "$line"
+    done < <(ip -4 addr show | awk '/inet /{print $NF" → "$2}')
+  fi
+
+  # Default gateway
+  GW=""
+  if command -v netstat &>/dev/null; then
+    GW=$(netstat -rn 2>/dev/null | awk '/default|0\.0\.0\.0/{print $2; exit}')
+  elif command -v ip &>/dev/null; then
+    GW=$(ip route | awk '/default/{print $3; exit}')
+  fi
+  [[ -n "$GW" ]] && row "Gateway:" "$GW"
+
+  # DNS servers
+  if [[ -f /etc/resolv.conf ]]; then
+    DNS=$(grep '^nameserver' /etc/resolv.conf | awk '{print $2}' | tr '\n' '  ')
+    [[ -n "$DNS" ]] && row "DNS Servers:" "$DNS"
+  fi
+
+  # Ping test
+  echo ""
+  echo -ne "  Pinging 8.8.8.8... "
+  if ping -c1 -W2 8.8.8.8 &>/dev/null 2>&1; then
+    MS=$(ping -c1 8.8.8.8 2>/dev/null | grep 'time=' | sed 's/.*time=//;s/ ms.*//')
+    ok "reachable (${MS}ms)"
+  else
+    err "unreachable"
+  fi
+  echo ""
+}
+
+cmd_fs() {
+  section "Filesystem"
+
+  echo ""
+  printf "  ${BOLD}${CYAN}%-20s %-8s %-8s %-8s %s${RESET}\n" "Mount" "Size" "Used" "Avail" "Use%"
+  echo -e "  ${DIM}──────────────────────────────────────────────${RESET}"
+
+  df -h 2>/dev/null | awk 'NR>1 && /^\// {
+    printf "  %-20s %-8s %-8s %-8s %s\n", $6, $2, $3, $4, $5
+  }'
+
+  echo ""
+
+  # Home directory size
+  HOME_SIZE=$(du -sh "$HOME" 2>/dev/null | awk '{print $1}')
+  row "Home dir ($HOME):" "${HOME_SIZE:-unknown}"
+
+  # Largest files in current dir
+  echo ""
+  section "Largest items in current directory"
+  du -sh ./* 2>/dev/null | sort -rh | head -8 | while read -r size path; do
+    row "$size" "$(basename "$path")"
+  done
+  echo ""
+}
+
+cmd_sys() {
+  section "System Info"
+
+  OS=$(uname -s)
+  ARCH=$(uname -m)
+  KERNEL=$(uname -r)
+  HOSTNAME=$(hostname)
+  UPTIME=$(uptime | sed 's/.*up //' | sed 's/,.*//')
+
+  row "OS:"       "$OS ($ARCH)"
+  row "Kernel:"   "$KERNEL"
+  row "Hostname:" "$HOSTNAME"
+  row "Uptime:"   "$UPTIME"
+
+  # CPU
+  if [[ "$OS" == "Darwin" ]]; then
+    CPU=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "unknown")
+    CORES=$(sysctl -n hw.logicalcpu 2>/dev/null || echo "?")
+    MEM=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 ))
+    row "CPU:"  "$CPU"
+    row "Cores:" "$CORES"
+    row "RAM:"  "${MEM}GB"
+  elif [[ "$OS" == "Linux" ]]; then
+    CPU=$(grep 'model name' /proc/cpuinfo 2>/dev/null | head -1 | cut -d: -f2 | xargs)
+    CORES=$(nproc 2>/dev/null || echo "?")
+    MEM=$(awk '/MemTotal/{printf "%.0fGB", $2/1048576}' /proc/meminfo 2>/dev/null)
+    [[ -n "$CPU" ]]   && row "CPU:"   "$CPU"
+    [[ -n "$CORES" ]] && row "Cores:" "$CORES"
+    [[ -n "$MEM" ]]   && row "RAM:"   "$MEM"
+  fi
+
+  echo ""
+}
+
+cmd_all() {
+  print_header
+  cmd_sys
+  cmd_net
+  cmd_ip
+  cmd_fs
+}
+
+usage() {
+  print_header
+  echo -e "  ${BOLD}Usage:${RESET} netinfo <command>"
+  echo ""
+  echo -e "  ${CYAN}Commands:${RESET}"
+  echo ""
+  printf "  ${GREEN}%-12s${RESET} %s\n" "all"    "Show everything (default)"
+  printf "  ${GREEN}%-12s${RESET} %s\n" "ip"     "Public IP via ifconfig.me + geo info"
+  printf "  ${GREEN}%-12s${RESET} %s\n" "net"    "Local network interfaces, gateway, DNS"
+  printf "  ${GREEN}%-12s${RESET} %s\n" "fs"     "Disk usage and largest files"
+  printf "  ${GREEN}%-12s${RESET} %s\n" "sys"    "System info (OS, CPU, RAM, uptime)"
+  printf "  ${GREEN}%-12s${RESET} %s\n" "version" "Show version"
+  printf "  ${GREEN}%-12s${RESET} %s\n" "help"   "Show this help"
+  echo ""
+}
+
+# ─────────────────────────────────────────────
+# Entry point
+# ─────────────────────────────────────────────
+
+CMD="${1:-all}"
+
+case "$CMD" in
+  all)     cmd_all ;;
+  ip)      print_header; cmd_ip ;;
+  net)     print_header; cmd_net ;;
+  fs)      print_header; cmd_fs ;;
+  sys)     print_header; cmd_sys ;;
+  version) echo "netinfo v${VERSION}" ;;
+  help|--help|-h) usage ;;
+  *)
+    err "Unknown command: $CMD"
+    echo ""
+    usage
+    exit 1
+    ;;
+esac
